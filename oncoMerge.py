@@ -43,7 +43,7 @@ parser.add_argument('-cfp', '--conversion_file_path', help='Supply hand annotate
 parser.add_argument('-ln', '--label_name', help='Label for Entrez ID column in GISTIC gene data file (default = \'Gene ID\')', type = str, default='Gene ID')
 parser.add_argument('-tp', '--thresh_path', help='Path to the GISTIC all_thresholded file (all_thresholded.by_genes.txt)', default = 'all_thresholded.by_genes.txt', type = str)
 parser.add_argument('-smp', '--som_mut_path', help='Path to the somatic mutations file (CSV matrix where columns are patients and genes are rows) [0 = not mutated, and 1 = mutated]', type = str)
-parser.add_argument('-mscv', '--mutsig2_cv', help='Path to a MutSig2CV output file', type = str)
+parser.add_argument('-mscv', '--mutsig2_cv_path', help='Path to a MutSig2CV output file', type = str)
 parser.add_argument('-op', '--output_path', help='Path you would like to output OncoMerged files (default = current directory)', type = str, default='.')
 parser.add_argument('-mmf', '--min_mut_freq', help='Minimum frequency of mutation (range = 0-1; default = 0.05)', type = float, default='0.05')
 parser.add_argument('-pp', '--perm_pv', help='Permuted p-value FDR BH corrected cutoff (default = 0.1)', type = float, default='0.1')
