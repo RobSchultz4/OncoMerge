@@ -18,35 +18,156 @@
 ## mention who built it. Thanks. :-)                    ##
 ##########################################################
 
+#####################
+## Import packages ##
+#####################
+import json
+import argparse
 import pandas as pd
 import numpy as np
 from statsmodels.stats.multitest import multipletests
 import itertools
-import argparse
 import sys
-import oncoMerge_utils as omu
-import pickle
-# Read in command line options
+import os
+
+##################################
+## Read in command line options ##
+##################################
 parser = argparse.ArgumentParser(description='Used to choose a cancer type')
+parser.add_argument('-cf', '--config_path', help='Path to JSON encoded configuration file, overrides command line parameters', type = str)
+parser.add_argument('-gp', '--gistic_path', help='Path to GISTIC output folder', type = str)
+parser.add_argument('-dp', '--del_path', help='Path to GISTIC deletion file (default = del_genes.conf_99.txt)', default = 'del_genes.conf_99.txt', type = str)
+parser.add_argument('-ap', '--amp_path', help='Path to the GISTIC amplification file (default = amp_genes.conf_99.txt)', default = 'amp_genes.conf_99.txt', type = str)
+parser.add_argument('-gdp', '--gene_data_path', help='Path to the GISTIC gene data file (default = all_data_by_genes.txt)', default = 'all_data_by_genes.txt', type = str)
+parser.add_argument('-cfp', '--conversion_file_path', help='Supply hand annotated file to convert gene symbols to Entrez IDs (default does not import hand annotated conversion file and instead uses conversion embedded in GISTIC output files).', type = str)
+parser.add_argument('-ln', '--label_name', help='Label for Entrez ID column in GISTIC gene data file (default = \'Gene ID\')', type = str, default='Gene ID')
+parser.add_argument('-tp', '--thresh_path', help='Path to the GISTIC all_thresholded file (all_thresholded.by_genes.txt)', default = 'all_thresholded.by_genes.txt', type = str)
+parser.add_argument('-smp', '--som_mut_path', help='Path to the somatic mutations file (CSV matrix where columns are patients and genes are rows) [0 = not mutated, and 1 = mutated]', type = str)
+parser.add_argument('-mscv', '--mutsig2_cv', help='Path to a MutSig2CV output file', type = str)
+parser.add_argument('-op', '--output_path', help='Path you would like to output OncoMerged files (default = current directory)', type = str, default='.')
 parser.add_argument('-mmf', '--min_mut_freq', help='Minimum frequency of mutation (range = 0-1; default = 0.05)', type = float, default='0.05')
 parser.add_argument('-pp', '--perm_pv', help='Permuted p-value FDR BH corrected cutoff (default = 0.1)', type = float, default='0.1')
-parser.add_argument('-rn', '--Run_Name', help='Must enter name of this oncoMerge run. Reccommend the 3 or 4 letter TCGA abbreviation for the tumor type or some other tumor type identifier', type = str)
 args = parser.parse_args()
 
-#For saving out each level of filtering:
-in_genes = {}
+#######################
+## Define parameters ##
+#######################
+params = args.__dict__
+if args.config_path:
+    with open(args.config_path, "r") as cfg:
+        tmp = json.loads(cfg.read())
+        for i in tmp:
+            params[i] = tmp[i]
+if (not params['gistic_path']) or (not params['som_mut_path']) or (not params['mutsig2CV_path']):
+    parser.print_help()
+    sys.exit(1)
 
-# read in inputs
-n1, mutSig2CV, sigPAMs, amp1, ampGenes, ampLoci, del1, delGenes, delLoci, somMuts, d1, lociThresh, PathTo = omu.Load_oncoMerge_Input(args.Run_Name, args.min_mut_freq)
+# Set minimum coincidence rate
+params['min_coinc'] = 0.001
 
-print(d1.shape)
-print(somMuts.shape)
+##################
+## Load up data ##
+##################
+# Create conversion series for gene symbol to Entrez ID
+if not params['conversion_file_path']:
+    n1 = pd.read_csv(params['gistic_path']+'/'+params['gene_data_path'],index_col=0,sep='\t',usecols=[0,1])
+    n1.index = [i.split('|')[0] for i in n1.index]
+    n1 = n1.drop_duplicates()
+    n1 = n1[params['label_name']]
+else:
+    n1 = pd.read_csv(params['conversion_file_path'],index_col=0)[label_name].apply(int)
+
+# load up significantly mutated genes
+mutSig2CV = pd.read_csv(params['mutsig2CV_path'],index_col=1)
+mutSig2CV = mutSig2CV.loc[mutSig2CV.index.map(lambda x: x in n1.index)]
+mutSig2CV.index = mutSig2CV.index.map(lambda x: n1.loc[x])
+mutSig2CV = mutSig2CV.loc[~mutSig2CV.index.duplicated(keep='first')]
+sigPAMs = list(mutSig2CV.index[mutSig2CV['q']<=0.05])
+
+# Get list of significantly CNA amplified genes
+ampGenes = []
+ampLoci = {}
+amp1 = pd.read_csv(params['gistic_path']+'/'+params['amp_path'],index_col=0,sep='\t')
+for col1 in amp1.columns:
+    if float(amp1[col1]['residual q value'])<=0.05:
+        ampGenes += [i.lstrip('[').rstrip(']') for i in list(amp1[col1].dropna()[3:])]
+        ampLoci[col1] = list(set([n1.loc[i] for i in [i.lstrip('[').rstrip(']').split('|')[0] for i in list(amp1[col1].dropna()[3:])] if i in n1.index and n1.loc[i]>0]))
+
+# Get list of significantly CNA deleted genes
+delGenes = []
+delLoci = {}
+del1 = pd.read_csv(params['gistic_path']+'/'+params['del_path'],index_col=0,sep='\t')
+for col1 in del1.columns:
+    if float(del1[col1]['residual q value'])<=0.05 and not (col1[0]=='X' or col1=='Y'):
+        delGenes += [i.lstrip('[').rstrip(']').split('|')[0] for i in list(del1[col1].dropna()[3:])]
+        delLoci[col1] = list(set([n1.loc[i] for i in [i.lstrip('[').rstrip(']').split('|')[0] for i in list(del1[col1].dropna()[3:])] if i in n1.index and n1.loc[i]>0]))
+
+# Convert gene ids for amp and del genes
+ampGenes = [n1.loc[i] for i in ampGenes if i in n1.index]
+delGenes = [n1.loc[i] for i in delGenes if i in n1.index]
+
+# Load up somatically mutated genes
+somMuts = pd.read_csv(params['som_mut_path'],index_col=0,header=0)
+if not somMuts.index.dtype=='int64':
+    somMuts = somMuts.loc[somMuts.index.map(lambda x: x in n1.index)]
+    somMuts.index = somMuts.index.map(lambda x: n1.loc[x])
+somMuts = somMuts.loc[~somMuts.index.duplicated(keep='first')]
+
+# Read in gistic all_data_by_genes file
+with open(params['gistic_path']+'/'+params['thresh_path'],'r') as inFile:
+    tmp = inFile.readline().strip().split('\t')
+    numCols1 = len(tmp)
+d1 = pd.read_csv(params['gistic_path']+'/'+params['thresh_path'],index_col=0,sep='\t').drop(tmp[1], axis = 1)
+d1.columns = [i[:12] for i in d1.columns]
+d1 = d1.loc[d1.index.map(lambda x: x.split('|')[0] in n1.index)]
+d1.index = d1.index.map(lambda x: n1.loc[x.split('|')[0]])
+d1.index.name = 'Locus ID'
+
+# Removing sex chromosomes (issues in CNA analysis) from d1
+lociThresh = d1['Cytoband']
+include = []
+for i in lociThresh:
+    if not(i[0]=='X' or i[0]=='Y'):
+        include.append(True)
+    else:
+        include.append(False)
+d1 = d1.loc[lociThresh[include].index].drop('Cytoband', axis = 1)
+
+# Removing sex chromosomes from ampLoci
+delMes = [i for i in ampLoci if i[0]=='X' or i[0]=='Y']
+for delMe in delMes:
+    del ampLoci[delMe]
+
+# Removing sex chromosomes from delLoci
+delMes = [i for i in delLoci if i[0]=='X' or i[0]=='Y']
+for delMe in delMes:
+    del delLoci[delMe]
+
+# Make sure somMuts and gistic have same samples
+somMuts = somMuts[list(set(d1.columns).intersection(somMuts.columns))]
+d1 = d1[list(set(d1.columns).intersection(somMuts.columns))]
+
+# Get rid of duplicated rows
+d1 = d1[~d1.index.duplicated(keep='first')]
+min_mut_freq = params['min_mut_freq']
+perm_pv = params['perm_pv']
+
+# Print out some useful information
+print('\tSize of CNA matrix: '+str(d1.shape))
+print('\tSize of somatic mutation matrix: '+str(somMuts.shape))
 print('Finished loading data.')
 
+# Make the output directory if it doesn't exists already
+if not os.path.exists(params['output_path']):
+    os.mkdir(params['output_path'])
+
+
+########################
+## Begin onocoMerging ##
+########################
 # Cutoff somatic mutations based on the minimum mutation frequency (mf)
 freq1 = somMuts.sum(axis=1)/len(list(somMuts.columns))
-somMutPoint = freq1[freq1>=args.min_mut_freq].index
-
+somMutPoint = freq1[freq1>=params['min_mut_freq']].index
 
 # Precompute positive and negative dichotomized matrices
 posdicot = (lambda x: 1 if x>=2 else 0)
@@ -58,7 +179,6 @@ print('Finished precomputing dichotomized matrices.')
 # Merge loci for deletions and amplifications
 lociCNAgenes = {}
 lociCNA = pd.DataFrame(columns=d1.columns)
-cna1 = []
 print('Combining deletion loci...')
 for loci1 in delLoci:
     # Get matrix of CNAs for genes in loci
@@ -83,18 +203,40 @@ for loci1 in ampLoci:
         lociCNA.loc[cnaName] = dedup.iloc[i]
         lociCNAgenes[cnaName] = [j for j in dt.index if dedup.iloc[i].equals(dt.loc[j])]
 
-print(lociCNA.shape)
-in_genes['d1'] = d1.index.values
-in_genes['somMuts'] = somMuts.index.values
-in_genes['posD1'] = posD1.index.values
-in_genes['negD1'] = negD1.index.values
+
+# Calculating Shallow Coincidence
+calcShallowCoincidence = ()
+shallowCoincidence = {'Act':{},'LoF':{}}
+totalPats = len(d1.columns)
+
+# Activating Shallow Coincidence
+for loci1 in ampLoci.keys():
+    for ampGene in ampLoci[loci1]:
+        if ampGene in somMuts.index and ampGene in d1.index:
+            ampProf = d1.loc[ampGene]
+            ampPats = set(ampProf.loc[ampProf.apply(np.sign) == 1].index)
+            somProf = somMuts.loc[ampGene]
+            somPats = somProf.loc[somProf == 1].index
+            coincPats = ampPats.intersection(somPats)
+            shallowCoincidence['Act'][ampGene] = len(coincPats)/totalPats
+
+# Loss of Function Shallow Coincidence
+for loci1 in delLoci.keys():
+    for delGene in delLoci[loci1]:
+        if delGene in somMuts.index and delGene in d1.index:
+            delProf = d1.loc[delGene]
+            delPats = set(delProf.loc[delProf.apply(np.sign) == -1].index)
+            somProf = somMuts.loc[delGene]
+            somPats = somProf.loc[somProf == 1].index
+            coincPats = delPats.intersection(somPats)
+            shallowCoincidence['LoF'][delGene] = len(coincPats)/totalPats
+
 # Make combined matrix
 # LoF = deletions + somatic point mutations
 # Act = amplifications + somatic point mutations
 print('Starting somatic mutations...')
 pamLofAct = {}
 freq = {}
-in_genes['somMutPoint'] = somMutPoint.values
 for s1 in somMutPoint:
     if s1>0:
         if not str(s1) in pamLofAct:
@@ -117,7 +259,6 @@ for s1 in somMutPoint:
                 freq[str(s1)] = {'PAM':tmpSom.mean(),'CNAdel':0,'CNAamp':0,'LoF':0,'Act':0}
 
 print('Starting deletions...')
-in_genes['delLoci'] = np.array([i for loci1 in delLoci for i in delLoci[loci1]])
 for loci1 in delLoci:
     for s1 in set(delLoci[loci1]).intersection(somMuts.index):
         if s1>0:
@@ -139,7 +280,6 @@ for loci1 in delLoci:
                     pamLofAct[str(s1)][str(s1)+'_LoF'] = tmpLoF
 
 print('Starting amplifications...')
-in_genes['ampLoci'] = np.array([i for loci1 in ampLoci for i in ampLoci[loci1]])
 for loci1 in ampLoci:
     for s1 in set(ampLoci[loci1]).intersection(somMuts.index):
         if s1>0:
@@ -164,7 +304,6 @@ print('Screening for frequency...')
 keepPAM = []
 keepers = {}
 calcSig = []
-in_genes['pamLofAct'] = np.array(list(pamLofAct.keys()))
 for s1 in pamLofAct:
     if s1 in freq:
         freqPAM = freq[s1]['PAM']
@@ -173,20 +312,21 @@ for s1 in pamLofAct:
         freqPos = freq[s1]['CNAamp']
         freqAct = freq[s1]['Act']
         if freqLoF>=0.05 or freqAct>=0.05 or freqPAM>=0.05:
-            print(''.join([str(i) for i in [n1.index[n1==int(s1)][0]+' ('+str(s1),') - FreqPAM: ', round(freqPAM,3), ' | FreqNeg: ', round(freqNeg,3), ' | FreqLoF: ', round(freqLoF,3), ' | FreqPos: ', round(freqPos,3),' | FreqAct: ', round(freqAct,3)]]))
-        if freqPAM>0 and freqPAM>=args.min_mut_freq and int(s1) in somMutPoint and int(s1) in sigPAMs:
+            print('\t'+''.join([str(i) for i in [n1.index[n1==int(s1)][0]+' ('+str(s1),') - FreqPAM: ', round(freqPAM,3), ' | FreqNeg: ', round(freqNeg,3), ' | FreqLoF: ', round(freqLoF,3), ' | FreqPos: ', round(freqPos,3),' | FreqAct: ', round(freqAct,3)]]))
+        if freqPAM>0 and freqPAM>=params['min_mut_freq'] and int(s1) in somMutPoint and int(s1) in sigPAMs:
             keepers[str(s1)+'_PAM'] = pamLofAct[str(s1)][str(s1)+'_PAM']
             keepPAM.append(str(s1)+'_PAM')
-        if str(s1)+'_LoF' in pamLofAct[str(s1)]  and freqLoF>freqPAM and freqLoF>=args.min_mut_freq and len(delGenes)>0:
+        if str(s1)+'_LoF' in pamLofAct[str(s1)]  and freqLoF>freqPAM and freqLoF>=params['min_mut_freq'] and shallowCoincidence['LoF'][int(s1)] >= params['min_coinc']:
             keepers[str(s1)+'_LoF'] = pamLofAct[str(s1)][str(s1)+'_LoF']
             calcSig.append(str(s1)+'_LoF')
-        if str(s1)+'_Act' in pamLofAct[str(s1)] and freqAct>freqPAM and freqAct>=args.min_mut_freq and len(ampGenes)>0:
+        if str(s1)+'_Act' in pamLofAct[str(s1)] and freqAct>freqPAM and freqAct>=params['min_mut_freq'] and shallowCoincidence['Act'][int(s1)] >= params['min_coinc']:
             keepers[str(s1)+'_Act'] = pamLofAct[str(s1)][str(s1)+'_Act']
             calcSig.append(str(s1)+'_Act')
 
 ## Write out LoF and Act significance file
 print('Permutation anlaysis...')
 numPermutes = 1000
+
 # Permute to get frequency
 def singlePermute(somMutsMF, somCNAsMF):
     tmp1 = pd.Series(np.random.permutation(somMutsMF), index=somMutsMF.index)
@@ -209,8 +349,6 @@ somMutsMF = somMuts.transpose().mean()
 somCNAsMF = posD1.transpose().mean()
 for i in range(numPermutes):
     permMF_pos += singlePermute(somMutsMF, somCNAsMF)
-
-in_genes['calcSig'] = np.array([i.split('_')[0] for i in calcSig])
 
 # Write Permutation Analysis file Lof_Act_sig
 lofActSig = pd.DataFrame(columns = ['Symbol', 'Type','Freq','Emp.p_value'], index = calcSig)
@@ -240,14 +378,14 @@ for sig1 in calcSig:
 
 if len(lofActSig)>0:
     lofActSig['q_value'] = multipletests(lofActSig['Emp.p_value'], 0.05, method='fdr_bh')[1]
-    lofActSig.sort_values('q_value').to_csv(PathTo['LofActSig'])
-    ## Screen out LoF and Act that don't meet significance cutoffs
-    keepLofAct = list(lofActSig.index[lofActSig['q_value']<=args.perm_pv])
+    lofActSig.sort_values('q_value').to_csv(params['output_path']+'/oncoMerge_ActLofPermPV.csv')
+    # Screen out LoF and Act that don't meet significance cutoffs
+    keepLofAct = list(lofActSig.index[lofActSig['q_value']<=params['perm_pv']])
 else:
-    lofActSig.to_csv(PathTo['LofActSig'])
+    lofActSig.to_csv(params['output_path']+'/oncoMerge_ActLofPermPV.csv')
     keepLofAct = []
 
-## Screen out PAMs that are LoF/Act
+# Screen out PAMs that are LoF/Act
 newKeepPAM = []
 for pam1 in keepPAM:
     found = 0
@@ -260,12 +398,12 @@ for pam1 in keepPAM:
 
 ## Screen out loci that have a representative gene
 # Mutations that are at or above minimum mutation frequency cutoff
-highFreqLoci = lociCNA[lociCNA.mean(axis=1)>=args.min_mut_freq]
+highFreqLoci = lociCNA[lociCNA.mean(axis=1)>=params['min_mut_freq']]
 
-# Figure out what loci are likely explained by current Act or LoF genes
+# Figure out what loci are explained by current Act or LoF genes
 explainedLoc = []
 for locus1 in highFreqLoci.index:
-    genesInLocus = [i for i in lociCNAgenes[locus1] if (str(i)+'_Act' in keepers.keys() or str(i)+'_LoF' in keepers.keys())]
+    genesInLocus = [i for i in lociCNAgenes[locus1] if (str(i)+'_Act' in keepLofAct or str(i)+'_LoF' in keepLofAct)]
     if len(genesInLocus)>0:
         explainedLoc.append(locus1.split('_')[0])
 
@@ -275,30 +413,65 @@ for locus1 in highFreqLoci.index:
     if not locus1.split('_')[0] in explainedLoc:
         keepLoc.append(locus1)
 
-in_genes['keepers'] = np.array([i.split('_')[0] for i in keepers.keys()])
-in_genes['keepLofAct'] =np.array( [i.split('_')[0] for i in keepLofAct])
-in_genes['keepLoc'] = np.array([i.split('_')[0] for i in keepLoc])
-in_genes['newKeepPAM'] = np.array([i.split('_')[0] for i in newKeepPAM])
+keepLoc_dict = {}
+for locus1 in set(['_'.join([i.split('_')[0],i.split('_')[-1]]) for i in keepLoc]):
+    locus2 = locus1.split('_')[0]
+    if locus2 in ampLoci.keys():
+        keepLoc_dict[locus1] = posD1.loc[ampLoci[locus2]]
+    if locus2 in delLoci.keys():
+        keepLoc_dict[locus1] = negD1.loc[delLoci[locus2]]
 
-## Write out OncoMerge output file
-finalMutFile = pd.concat([pd.DataFrame(keepers).transpose().loc[newKeepPAM].sort_index(),pd.DataFrame(keepers).transpose().loc[keepLofAct].sort_index(),lociCNA.loc[keepLoc].sort_index()])
-finalMutFile.to_csv(PathTo['oncoMerged'])
+def mode2(pat1col):
+    tmpser = pat1col.mode()
+    if len(tmpser)>1:
+        tmp10 = 1
+    else:
+        tmp10 = tmpser.iloc[0]
+    return tmp10
 
-# Pickle in_genes for QC
-#in_genes['final'] = [i.split('_')[0] for i in finalMutFile.index]
-picme = open(PathTo['output']+'/in_genes.pkl', 'wb')
-pickle.dump( in_genes, picme)
-picme.close()
+keepLoc_df = pd.DataFrame(columns = d1.columns)
+tmpMode = pd.Series(index = d1.columns)
+for locus1 in keepLoc_dict.keys():
+    for pat1 in keepLoc_dict[locus1].columns:
+         tmpMode.loc[pat1] = mode2(keepLoc_dict[locus1][pat1])
+    if tmpMode.mean()>=0.05:
+        keepLoc_df.loc[locus1] = tmpMode
+
+keepLoc_df = keepLoc_df.applymap(int)
+
+####################################
+## Compile OncoMerge output files ##
+####################################
+finalMutFile = pd.concat([pd.DataFrame(keepers).transpose().loc[newKeepPAM].sort_index(), pd.DataFrame(keepers).transpose().loc[keepLofAct].sort_index(), keepLoc_df.sort_index()], sort=True)
+
+# Rename all loci with only one gene
+ind_list = finalMutFile.index.tolist()
+for locus1 in keepLoc_df.index:
+    splitUp = locus1.split('_')
+    if splitUp[-1]=='CNAamp' and len(ampLoci[splitUp[0]])==1:
+        idx = ind_list.index(locus1)
+        ind_list[idx] = str(ampLoci[splitUp[0]][0]) + '_CNAamp'
+    if splitUp[-1]=='CNAdel' and len(delLoci[splitUp[0]])==1:
+        idx = ind_list.index(locus1)
+        ind_list[idx] = str(delLoci[splitUp[0]][0]) + '_CNAdel'
+
+finalMutFile.index = ind_list
+
+# Write file
+finalMutFile.to_csv(params['output_path']+'/oncoMerge_mergedMuts.csv')
 
 ## Write out loci
 # Prepare for writing out
 writeLoci = ['Locus_name,Genes']
-for locus1 in lociCNAgenes:
-    writeLoci.append(locus1+','+' '.join([str(i) for i in lociCNAgenes[locus1]]))
+for locus1 in keepLoc_df.index:
+    splitUp = locus1.split('_')
+    if splitUp[-1]=='CNAamp':
+        writeLoci.append(locus1+','+' '.join([str(i) for i in ampLoci[splitUp[0]]]))
+    if splitUp[-1]=='CNAdel':
+        writeLoci.append(locus1+','+' '.join([str(i) for i in delLoci[splitUp[0]]]))
 
 # Write out file
-with open(PathTo['CNALoci'],'w') as outFile:
+with open(params['output_path']+'/oncoMerge_CNA_loci.csv','w') as outFile:
     outFile.write('\n'.join(writeLoci))
 
 print('Done.')
-
