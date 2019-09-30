@@ -43,10 +43,11 @@ parser.add_argument('-cfp', '--conversion_file_path', help='Supply hand annotate
 parser.add_argument('-ln', '--label_name', help='Label for Entrez ID column in GISTIC gene data file (default = \'Gene ID\')', type = str, default='Gene ID')
 parser.add_argument('-tp', '--thresh_path', help='Path to the GISTIC all_thresholded file (all_thresholded.by_genes.txt)', default = 'all_thresholded.by_genes.txt', type = str)
 parser.add_argument('-smp', '--som_mut_path', help='Path to the somatic mutations file (CSV matrix where columns are patients and genes are rows) [0 = not mutated, and 1 = mutated]', type = str)
-parser.add_argument('-mscv', '--mutsig2_cv_path', help='Path to a MutSig2CV output file', type = str)
+parser.add_argument('-mscv', '--mutsig2_cv', help='Path to a MutSig2CV output file', type = str)
 parser.add_argument('-op', '--output_path', help='Path you would like to output OncoMerged files (default = current directory)', type = str, default='.')
 parser.add_argument('-mmf', '--min_mut_freq', help='Minimum frequency of mutation (range = 0-1; default = 0.05)', type = float, default='0.05')
 parser.add_argument('-pp', '--perm_pv', help='Permuted p-value FDR BH corrected cutoff (default = 0.1)', type = float, default='0.1')
+parser.add_argument('-lg', '--min_loci_genes', help='Minimum number of genes in loci to apply shallow coincidence filter, default = 2', type = int, default='2')
 args = parser.parse_args()
 
 #######################
@@ -63,7 +64,11 @@ if (not params['gistic_path']) or (not params['som_mut_path']) or (not params['m
     sys.exit(1)
 
 # Set minimum coincidence rate
-params['min_coinc'] = 0.001
+if not params['min_coinc']:
+    params['min_coinc'] = 0.001
+
+if not params['min_loci_genes']:
+    params['min_loci_genes'] = 2
 
 ##################
 ## Load up data ##
@@ -75,7 +80,7 @@ if not params['conversion_file_path']:
     n1 = n1.drop_duplicates()
     n1 = n1[params['label_name']]
 else:
-    n1 = pd.read_csv(params['conversion_file_path'],index_col=0)[label_name].apply(int)
+    n1 = pd.read_csv(params['conversion_file_path'],index_col=0)[params['label_name']].apply(int)
 
 # load up significantly mutated genes
 mutSig2CV = pd.read_csv(params['mutsig2CV_path'],index_col=1)
@@ -123,6 +128,7 @@ d1 = d1.loc[d1.index.map(lambda x: x.split('|')[0] in n1.index)]
 d1.index = d1.index.map(lambda x: n1.loc[x.split('|')[0]])
 d1.index.name = 'Locus ID'
 
+
 # Removing sex chromosomes (issues in CNA analysis) from d1
 lociThresh = d1['Cytoband']
 include = []
@@ -131,6 +137,7 @@ for i in lociThresh:
         include.append(True)
     else:
         include.append(False)
+
 d1 = d1.loc[lociThresh[include].index].drop('Cytoband', axis = 1)
 
 # Removing sex chromosomes from ampLoci
@@ -149,8 +156,6 @@ d1 = d1[list(set(d1.columns).intersection(somMuts.columns))]
 
 # Get rid of duplicated rows
 d1 = d1[~d1.index.duplicated(keep='first')]
-min_mut_freq = params['min_mut_freq']
-perm_pv = params['perm_pv']
 
 # Print out some useful information
 print('\tSize of CNA matrix: '+str(d1.shape))
@@ -205,7 +210,6 @@ for loci1 in ampLoci:
 
 
 # Calculating Shallow Coincidence
-calcShallowCoincidence = ()
 shallowCoincidence = {'Act':{},'LoF':{}}
 totalPats = len(d1.columns)
 
@@ -300,6 +304,8 @@ for loci1 in ampLoci:
                 if not (str(s1)+'_Act' in pamLofAct[str(s1)] or tmpAct.equals(tmpSom) or tmpAct.equals(tmpPos)):
                     pamLofAct[str(s1)][str(s1)+'_Act'] = tmpAct
 
+
+
 print('Screening for frequency...')
 keepPAM = []
 keepers = {}
@@ -316,10 +322,10 @@ for s1 in pamLofAct:
         if freqPAM>0 and freqPAM>=params['min_mut_freq'] and int(s1) in somMutPoint and int(s1) in sigPAMs:
             keepers[str(s1)+'_PAM'] = pamLofAct[str(s1)][str(s1)+'_PAM']
             keepPAM.append(str(s1)+'_PAM')
-        if str(s1)+'_LoF' in pamLofAct[str(s1)]  and freqLoF>freqPAM and freqLoF>=params['min_mut_freq'] and shallowCoincidence['LoF'][int(s1)] >= params['min_coinc']:
+        if str(s1)+'_LoF' in pamLofAct[str(s1)] and freqLoF>freqPAM and freqLoF>=params['min_mut_freq']:
             keepers[str(s1)+'_LoF'] = pamLofAct[str(s1)][str(s1)+'_LoF']
             calcSig.append(str(s1)+'_LoF')
-        if str(s1)+'_Act' in pamLofAct[str(s1)] and freqAct>freqPAM and freqAct>=params['min_mut_freq'] and shallowCoincidence['Act'][int(s1)] >= params['min_coinc']:
+        if str(s1)+'_Act' in pamLofAct[str(s1)] and freqAct>freqPAM and freqAct>=params['min_mut_freq']:
             keepers[str(s1)+'_Act'] = pamLofAct[str(s1)][str(s1)+'_Act']
             calcSig.append(str(s1)+'_Act')
 
@@ -380,10 +386,48 @@ if len(lofActSig)>0:
     lofActSig['q_value'] = multipletests(lofActSig['Emp.p_value'], 0.05, method='fdr_bh')[1]
     lofActSig.sort_values('q_value').to_csv(params['output_path']+'/oncoMerge_ActLofPermPV.csv')
     # Screen out LoF and Act that don't meet significance cutoffs
-    keepLofAct = list(lofActSig.index[lofActSig['q_value']<=params['perm_pv']])
+    keepLofAct0 = list(lofActSig.index[lofActSig['q_value']<=params['perm_pv']])
 else:
     lofActSig.to_csv(params['output_path']+'/oncoMerge_ActLofPermPV.csv')
-    keepLofAct = []
+    keepLofAct0 = []
+
+# Filter passenger mutations from keepLofAct using Shallow Coincidence
+def FindLoci(inp):
+    gene1, mutType = inp.split('_')
+    if mutType == 'Act':
+        LociSet = ampLoci
+    if mutType == 'LoF':
+        LociSet = delLoci
+    ret = []
+    for locus1 in LociSet.keys():
+        if int(gene1) in LociSet[locus1]:
+            ret.append(loci1)
+    return ret
+
+LofActLoci_dict = {}
+for mut in keepLofAct0:
+    mutLoci1 = FindLoci(mut)
+    for locus1 in mutLoci1:
+        if locus1 not in LofActLoci_dict.keys():
+            LofActLoci_dict[locus1] = []
+        LofActLoci_dict[locus1].append(mut)
+
+
+keepLofAct1 = []
+for locus1 in LofActLoci_dict.keys():
+    if len(LofActLoci_dict[loci1]) < params['min_loci_genes']:
+        keepLofAct1.extend(LofActLoci_dict[loci1])
+    else:
+        for mut in LofActLoci_dict[locus1]:
+            gene1, mutType1 = mut.split('_')
+            if shallowCoincidence[mutType1][int(gene1)] < params['min_coinc']:
+                print(mut + ' filtered with shallow coincidence = ' + str(shallowCoincidence[mutType1][int(gene1)]))
+            else:
+                keepLofAct1.append(mut)
+
+
+keepLofAct = list(set(keepLofAct1))
+
 
 # Screen out PAMs that are LoF/Act
 newKeepPAM = []
@@ -429,6 +473,7 @@ def mode2(pat1col):
         tmp10 = tmpser.iloc[0]
     return tmp10
 
+# Use most common value to determine the mutational profile of a loci
 keepLoc_df = pd.DataFrame(columns = d1.columns)
 tmpMode = pd.Series(index = d1.columns)
 for locus1 in keepLoc_dict.keys():
