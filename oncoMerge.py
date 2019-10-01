@@ -382,6 +382,8 @@ for sig1 in calcSig:
     elif sig1.find('Act')>0:
         lofActSig.loc[sig1, 'Emp.p_value'] = permdict1['Act'][freq[sig1.rstrip('_Act')]['Act']]
 
+# Should we include Loci size and Shallow Coinicidence in this output? Because that's causing things to be filtered and it might seem unclear why otherwise.
+# Also is perm_pv misleading? Should we change it to perm_qv?
 if len(lofActSig)>0:
     lofActSig['q_value'] = multipletests(lofActSig['Emp.p_value'], 0.05, method='fdr_bh')[1]
     lofActSig.sort_values('q_value').to_csv(params['output_path']+'/oncoMerge_ActLofPermPV.csv')
@@ -401,7 +403,7 @@ def FindLoci(inp):
     ret = []
     for locus1 in LociSet.keys():
         if int(gene1) in LociSet[locus1]:
-            ret.append(loci1)
+            ret.append(locus1)            #
     return ret
 
 LofActLoci_dict = {}
@@ -415,8 +417,8 @@ for mut in keepLofAct0:
 
 keepLofAct1 = []
 for locus1 in LofActLoci_dict.keys():
-    if len(LofActLoci_dict[loci1]) < params['min_loci_genes']:
-        keepLofAct1.extend(LofActLoci_dict[loci1])
+    if len(LofActLoci_dict[locus1]) < params['min_loci_genes']:
+        keepLofAct1.extend(LofActLoci_dict[locus1])
     else:
         for mut in LofActLoci_dict[locus1]:
             gene1, mutType1 = mut.split('_')
