@@ -46,7 +46,7 @@ parser.add_argument('-smp', '--som_mut_path', help='Path to the somatic mutation
 parser.add_argument('-mscv', '--mutsig2_cv', help='Path to a MutSig2CV output file', type = str)
 parser.add_argument('-op', '--output_path', help='Path you would like to output OncoMerged files (default = current directory)', type = str, default='.')
 parser.add_argument('-mmf', '--min_mut_freq', help='Minimum frequency of mutation (range = 0-1; default = 0.05)', type = float, default='0.05')
-parser.add_argument('-pp', '--perm_pv', help='Permuted p-value FDR BH corrected cutoff (default = 0.1)', type = float, default='0.1')
+parser.add_argument('-pq', '--perm_qv', help='Permuted p-value FDR BH corrected cutoff (default = 0.1)', type = float, default='0.1')
 parser.add_argument('-lg', '--min_loci_genes', help='Minimum number of genes in loci to apply shallow coincidence filter, default = 2', type = int, default='2')
 args = parser.parse_args()
 
@@ -69,6 +69,9 @@ if not params['min_coinc']:
 
 if not params['min_loci_genes']:
     params['min_loci_genes'] = 2
+
+# Initialize summary table
+OMS = pd.DataFrame(columns = ['Symbol', 'Mutation Type', 'OM Frequency', 'OM Emp.p_value','OM q_value', 'OM Mutation', 'Locus', 'mutsig2cv q value', 'gistic res q value', 'PAM Frequency','CNA Frequency', 'Neg Frequency','Pos Frequency','LoF Frequency','Act Frequency','Delta',  'Freq Extension by CNA', 'Freq Extension by PAM', 'Coincidence Rate', 'PAM-Coinc', 'CNA-Coinc', 'Shallow Coincidence Rate'])
 
 ##################
 ## Load up data ##
@@ -245,6 +248,8 @@ for s1 in somMutPoint:
     if s1>0:
         if not str(s1) in pamLofAct:
             pamLofAct[str(s1)] = {}
+        if not s1 in OMS.index:
+            OMS.loc[s1] = np.nan
         tmpSom = somMuts.loc[s1]
         # If potential PAM, store PAM
         if not (str(s1)+'_PAM' in pamLofAct[str(s1)] or sum(tmpSom)==0):
@@ -262,10 +267,14 @@ for s1 in somMutPoint:
             if not s1 in freq:
                 freq[str(s1)] = {'PAM':tmpSom.mean(),'CNAdel':0,'CNAamp':0,'LoF':0,'Act':0}
 
+
 print('Starting deletions...')
 for loci1 in delLoci:
     for s1 in set(delLoci[loci1]).intersection(somMuts.index):
         if s1>0:
+            if not s1 in OMS.index:
+                OMS.loc[s1] = np.nan
+            OMS.loc[s1,'Locus'] = loci1
             # If potential Lof
             if s1 in somMuts.index and s1 in negD1.index:
                 tmpSom = somMuts.loc[s1]
@@ -287,6 +296,9 @@ print('Starting amplifications...')
 for loci1 in ampLoci:
     for s1 in set(ampLoci[loci1]).intersection(somMuts.index):
         if s1>0:
+            if not s1 in OMS.index:
+                OMS.loc[s1] = np.nan
+            OMS.loc[s1,'Locus'] = loci1
             # If potential Act
             if s1 in somMuts.index and s1 in posD1.index:
                 tmpSom = somMuts.loc[s1]
@@ -382,13 +394,11 @@ for sig1 in calcSig:
     elif sig1.find('Act')>0:
         lofActSig.loc[sig1, 'Emp.p_value'] = permdict1['Act'][freq[sig1.rstrip('_Act')]['Act']]
 
-# Should we include Loci size and Shallow Coinicidence in this output? Because that's causing things to be filtered and it might seem unclear why otherwise.
-# Also is perm_pv misleading? Should we change it to perm_qv?
 if len(lofActSig)>0:
     lofActSig['q_value'] = multipletests(lofActSig['Emp.p_value'], 0.05, method='fdr_bh')[1]
     lofActSig.sort_values('q_value').to_csv(params['output_path']+'/oncoMerge_ActLofPermPV.csv')
     # Screen out LoF and Act that don't meet significance cutoffs
-    keepLofAct0 = list(lofActSig.index[lofActSig['q_value']<=params['perm_pv']])
+    keepLofAct0 = list(lofActSig.index[lofActSig['q_value']<=params['perm_qv']])
 else:
     lofActSig.to_csv(params['output_path']+'/oncoMerge_ActLofPermPV.csv')
     keepLofAct0 = []
@@ -520,5 +530,68 @@ for locus1 in keepLoc_df.index:
 # Write out file
 with open(params['output_path']+'/oncoMerge_CNA_loci.csv','w') as outFile:
     outFile.write('\n'.join(writeLoci))
+
+'''
+## Write oncoMerge Summary Table
+
+
+def getLocus(cancer,gene, mutType):
+    if 'Act' == mutType or 'CNAamp' == mutType:
+        for locus in ins[cancer]['ampLoci'].keys():
+            if int(gene) in ins[cancer]['ampLoci'][locus]:
+                return locus
+    elif 'LoF' == mutType or 'CNAdel' == mutType:
+        for locus in ins[cancer]['delLoci'].keys():
+            if int(gene) in ins[cancer]['delLoci'][locus]:
+                return locus
+    else:
+        if int(gene) in Locus_df.index:
+            l1 = []
+            numLocs = 0
+            for loci1 in wp_dict[cancer]:
+                if 'Unnamed' not in loci1:
+                    chrom, startstop1 = wp_dict[cancer][loci1].split(':')
+                    if chrom == Locus_df.loc[int(gene),'chr']:
+                        start1, stop1 = startstop1.split('-')
+                        if not (int(start1) > Locus_df.loc[int(gene),'stop']) and not(int(stop1) < Locus_df.loc[int(gene),'start']):
+                            l1.append(loci1)
+                            numLocs += 1
+            if numLocs>0:
+                return l1[0]
+            else:
+                return'NA'
+        else:
+            return 'NA'
+    return 'NA'
+
+def getMutSig2CVq(gene, mutType):
+    if 'q' not in gene and 'p' not in gene:
+        if int(gene) in mutSig2CV.index:
+            return mutSig2CV.loc[int(gene), 'q']
+        else:
+            return 'NA'
+    else:
+        return 'NA'
+
+def getGisticq(gene, mutType,locus):
+    if 'q' not in gene and 'p' not in gene:
+        if 'Act' == mutType or 'CNAamp' == mutType:
+            return float(amp1.loc['residual q value', locus])
+        elif 'LoF' == mutType or 'CNAdel' == mutType:
+            return float(del1.loc['residual q value', locus])
+        else:
+            return 'NA'                                                                                 #
+    else:
+        if 'CNAamp' == mutType:
+            return float(amp1.loc['residual q value', gene])
+        if 'CNAdel' == mutType:
+            return float(del1.loc['residual q value', gene])
+
+
+for mut1 in OMS.index:
+    #Add Symbol conversions
+    if mut1 in n1.values:
+        OMS.loc[mut1, 'Symbol'] = n1.index[n1==int(mut1.split('_')[0])][0]
+'''
 
 print('Done.')
