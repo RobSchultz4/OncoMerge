@@ -5,24 +5,26 @@ import pandas as pd
 from matplotlib.backends.backend_pdf import PdfPages
 import seaborn as sns
 from matplotlib import pyplot as plt
+import numpy as np
 
 parser = argparse.ArgumentParser(description='OncoMerge merges patient Protein Affecting Mutations (PAMs) and Copy Number Alterations (CNAs) into a unified mutation matrix.')
 parser.add_argument('-cf', '--config_path', help='Path to JSON encoded configuration file, overrides command line parameters', type = str)
 parser.add_argument('-op', '--output_path', help='Path you would like to output OncoMerged files (default = current directory)', type = str, default = '.')
 args = parser.parse_args()
 
-
 params = args.__dict__
+output_path = params['output_path']
 if args.config_path:
     with open(args.config_path, "r") as cfg:
         tmp = json.loads(cfg.read())
         for i in tmp:
             params[i] = tmp[i]
 
+params['output_path'] = output_path
 
-summaryMatrix = pd.read_csv(params['output_path']+'/oncoMerge_summaryMatrix.csv')
-
-summaryMatrix = pd.concat(sumTables)
+summaryMatrix = pd.read_csv(params['output_path']+'/oncoMerge_summaryMatrix.csv',index_col = 0)
+summaryMatrix.index.name = 'Entrez'
+#summaryMatrix = pd.concat(sumTables)
 tmpcol = summaryMatrix.reset_index().ix[:,0].to_frame()
 tmpcol.columns = ['Tumor_type']
 tmpcol.index = summaryMatrix.index
@@ -35,17 +37,20 @@ summaryMatrix['PAM_only'] = summaryMatrix['Final_freq'] - summaryMatrix['CNA_fre
 summaryMatrix['Coincidence_rate'] = summaryMatrix['PAM_freq'] + summaryMatrix['CNA_freq'] - summaryMatrix['Final_freq']
 summaryMatrix['CNA_only'] = summaryMatrix['Final_freq'] - summaryMatrix['PAM_freq']
 
+
+print("Creating Violin Plots")
 #Plots Violins showing distribution of mutation frequency for different Mutation Types.
 with PdfPages(args.output_path+ '/FreqViolins_byMutType_swarm.pdf') as pdf:
-    data = summaryMatrix['Final_freq','Final_mutation_type']
+    data = summaryMatrix[['Final_freq','Final_mutation_type']]
     ax = sns.violinplot(x = 'Final_mutation_type', y = 'Final_freq', scale = 'count', inner = None, order = ['PAM','Act','CNAamp','LoF','CNAdel'], data = data)
     ax = sns.swarmplot( x = 'Final_mutation_type', y = 'Final_freq', color = 'k',     size = 2,     order = ['PAM','Act','CNAamp','LoF','CNAdel'], data = data) #, ax = ax)
-    plt.ylim(float(mf), 1)
-    plt.title('Frequency of Mutation'
+    plt.ylim(float(0.05), 1)
+    plt.title('Frequency of Mutation')
     pdf.savefig()
     plt.close()
 
 
+print("Creating Recovered Mutations Table")
 # Create a table showing the Number of recovered Genes
 recoveredMuts_df = summaryMatrix.loc[(summaryMatrix['PAM_freq'] < 0.05) & (summaryMatrix['CNA_freq'] < 0.05)]
 recovered_MutTypes_Raw_df = pd.DataFrame(index = ['Recovered_mutations'], columns = ['Act','LoF'])
@@ -54,6 +59,8 @@ for sm in ['Act', 'LoF']:
 
 recovered_MutTypes_Raw_df.to_csv(args.output_path + '/recovered_MutTypes_Raw.csv')
 
+
+print("Creating Stacked Bar Plots")
 # Create a Stacked Bar Plot showing the extension of the mutational frequency by including CNA data.
 with PdfPages(args.output_path+'/StackedBars.pdf') as pdf:
     summaryMatrix = summaryMatrix.loc[list(summaryMatrix['Final_mutation_type'].sort_values().index)]
@@ -70,9 +77,3 @@ with PdfPages(args.output_path+'/StackedBars.pdf') as pdf:
     plt.tight_layout()
     pdf.savefig()
     plt.close()
-
-
-
-
-
-
