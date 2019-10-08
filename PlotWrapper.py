@@ -22,14 +22,13 @@ proc31 = Popen('python withinCancerEvaluation.py -cf Bueno/BUENO_config_deep.jso
 out = proc11.communicate()
 
 # Run first run with both filters
-proc4 = Popen('python oncoMerge.py -cf Bueno/BUENO_config_deep.json -lp Bueno/no_filter -sp -pq 0.1 -mcr 0.001 -op Bueno/pq_mcr', shell=True, stdin=PIPE, stdout=PIPE, stderr=PIPE)
+proc4 = Popen('python oncoMerge.py -cf Bueno/BUENO_config_deep.json -lp Bueno/no_filter -pq 0.1 -mcr 0.001 -op Bueno/pq_mcr', shell=True, stdin=PIPE, stdout=PIPE, stderr=PIPE)
 out = proc4.communicate()
 #Get plots for run with both filters
 proc41 = Popen('python withinCancerEvaluation.py -cf Bueno/BUENO_config_deep.json -op Bueno/pq_mcr', shell=True, stdin=PIPE, stdout=PIPE, stderr=PIPE)
 out = proc11.communicate()
 
 # Get Plots From Across all Runs
-proc5 = Popen('python crossCancerEvaluation.py -cf Bueno/BUENO_config_deep.json -s Bueno/Summary_Paths.xlsx', shell=True, stdin=PIPE, stdout=PIPE, stderr=PIPE)
+proc5 = Popen('python crossCancerEvaluation.py -cf Bueno/BUENO_config_deep.json -s Bueno/Summary_Paths.csv', shell=True, stdin=PIPE, stdout=PIPE, stderr=PIPE)
 out = proc11.communicate()
-
 
